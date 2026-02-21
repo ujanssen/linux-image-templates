@@ -1,51 +1,61 @@
-- hosts: default
+---
+- hosts: all
   become: true
 
   tasks:
-    - name: update APT cache
+    # 1. System Update
+    - name: Update and upgrade APT packages
       apt:
-        update_cache: true
+        update_cache: yes
+        upgrade: dist
         cache_valid_time: 3600
-      when: ansible_distribution == 'Ubuntu'
-    - name: upgrade to a HWE kernel
-      apt:
-        name: "linux-generic-hwe-{{ ansible_distribution_version }}"
-      when: ansible_distribution == 'Ubuntu'
-    - name: reboot for the new kernel to take effect and to ensure that a VM is bootable
-      reboot:
-      when: ansible_distribution == 'Ubuntu'
 
-    # Guest agent for Tart VMs installation: common tasks
-    - name: retrieve latest release metadata for Guest agent for Tart VMs
-      ansible.builtin.uri:
+    # 2. Tart Guest Agent (Direkt für ARM64)
+    - name: Get latest Tart Guest Agent metadata
+      uri:
         url: "https://api.github.com/repos/cirruslabs/tart-guest-agent/releases/latest"
       register: latest_release
-    - name: normalize architecture name reported by Ansible to be Golang-like
-      set_fact:
-        golang_architecture: "{{ mapping.get(ansible_architecture, ansible_architecture) }}"
-      vars:
-        mapping:
-          x86_64: amd64
-          aarch64: arm64
-    - name: figure out Guest agent for Tart VMs base URL for .deb/.rpm's
-      set_fact:
-        tart_guest_agent_base_url: "{{
-          latest_release.json.assets |
-          selectattr('name', 'match', '^tart-guest-agent_.*_linux_' + golang_architecture + '.(deb|rpm)$') |
-          map(attribute='browser_download_url') |
-          first |
-          regex_replace('.(deb|rpm)$', '')
-        }}"
 
-    # Guest agent for Tart VMs installation: Debian-based
-    - name: install Guest agent for Tart VMs
+    - name: Install Tart Guest Agent (ARM64)
       apt:
-        deb: "{{ tart_guest_agent_base_url }}.deb"
-      when: ansible_os_family == 'Debian'
+        deb: "{{ latest_release.json.assets | selectattr('name', 'search', 'linux_arm64.deb') | map(attribute='browser_download_url') | first }}"
 
-    # Guest agent for Tart VMs installation: RedHat-based
-    - name: install Guest agent for Tart VMs
-      dnf:
-        name: "{{ tart_guest_agent_base_url }}.rpm"
-        disable_gpg_check: yes
-      when: ansible_os_family == 'RedHat'
+    # 3. Netzwerk-Fix für VirtIO (Apple Silicon)
+    - name: Install ethtool
+      apt:
+        name: ethtool
+        state: present
+
+    - name: Disable GRO to fix 'suspect GRO implementation'
+      shell: |
+        ethtool -K enp0s1 gro off
+      ignore_errors: yes
+
+    - name: Make GRO disable persistent via udev
+      copy:
+        dest: /etc/udev/rules.d/10-fix-network.rules
+        content: |
+          ACTION=="add", SUBSYSTEM=="net", NAME=="enp0s1", RUN+="/usr/sbin/ethtool -K enp0s1 gro off"
+
+    # 4. Cleanup & Vorbereitung für VM-Templates
+    - name: Remove unused packages and purge
+      apt:
+        autoremove: yes
+        purge: yes
+
+    - name: Clean APT cache
+      apt:
+        autoclean: yes
+
+    - name: Reset Machine-ID for cloning
+      shell: |
+        truncate -s 0 /etc/machine-id
+        rm -f /var/lib/dbus/machine-id
+        ln -sf /etc/machine-id /var/lib/dbus/machine-id
+
+    - name: Clear shell history
+      shell: |
+        history -c
+        rm -f /root/.bash_history
+        rm -f /home/*/.bash_history
+ 

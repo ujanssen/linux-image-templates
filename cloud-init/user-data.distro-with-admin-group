@@ -1,11 +1,21 @@
 #cloud-config
-
 users:
   - name: admin
-    primary_group: admin
-    plain_text_passwd: admin
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
+    groups: [sudo] # 'sudo' ist die Standard-Gruppe in Debian
     shell: /bin/bash
+    plain_text_passwd: admin
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
 
+# Erzwingt die Passwort-Authentifizierung explizit
 ssh_pwauth: true
+disable_root: true
+chpasswd:
+  list: |
+    admin:admin
+  expire: false
+
+# Sicherstellen, dass SSH-Änderungen sofort greifen
+runcmd:
+  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl reload ssh
